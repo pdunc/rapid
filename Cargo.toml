@@ -7,4 +7,5 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.3.2", features = ["derive"] }
+polars = "0.30.0"
 rust-stdf = "0.3.1"
