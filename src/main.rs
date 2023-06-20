@@ -1,8 +1,11 @@
 use chrono::{TimeZone, Utc};
 use clap::Parser;
+use polars::functions::diag_concat_df;
 use polars::prelude::*;
 use rust_stdf::{stdf_file::*, StdfRecord};
 use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::path::Path;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
@@ -22,6 +25,14 @@ struct Args {
     #[arg(short = 'm', long)]
     multiple_output_files: bool,
 
+    /// Name separator for test names and numbers
+    #[arg(short, long, default_value_t=("::").to_string())]
+    separator: String,
+
+    /// Output directory
+    #[arg(short, long)]
+    output_dir: Option<String>,
+
     /// Files to process
     files: Vec<String>,
 }
@@ -36,6 +47,15 @@ fn main() {
 
     println!("{:?}", args);
 
+    let out_dir_value = args.output_dir.clone().unwrap_or(("").to_string());
+    let output_dir = if args.output_dir.is_some() {
+        Some(Path::new(&out_dir_value))
+    } else {
+        None
+    };
+
+    let mut dfs: Vec<DataFrame> = vec![];
+
     let (tx, rx) = mpsc::channel();
 
     let mut handles: Vec<JoinHandle<()>> = vec![];
@@ -43,7 +63,6 @@ fn main() {
     for stdf_path in args.files {
         let tx_to_closure = tx.clone();
         let handle = thread::spawn(move || {
-            println!("starting to process {}", stdf_path);
             let mut reader = match StdfReader::new(&stdf_path) {
                 Ok(r) => r,
                 Err(e) => {
@@ -67,11 +86,8 @@ fn main() {
                     })
                     .unwrap();
             }
-
-            println!("finished processing {}", stdf_path);
         });
 
-        println!("pushing the handle");
         handles.push(handle);
     }
 
@@ -100,47 +116,9 @@ fn main() {
     for msg in rx {
         match msg.rec {
             StdfRecord::MIR(mir) => {
-                // let setup_t = Utc.timestamp_opt(mir.setup_t.into(), 0).unwrap();
-
-                // let mir_string = format!(
-                //     "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},",
-                //     msg.sender,
-                //     mir.lot_id,
-                //     mir.serl_num,
-                //     setup_t.to_rfc3339(),
-                //     mir.part_typ,
-                //     mir.dsgn_rev,
-                //     mir.pkg_typ,
-                //     mir.facil_id,
-                //     mir.proc_id,
-                //     mir.flow_id,
-                //     mir.job_nam,
-                //     mir.job_rev,
-                //     mir.oper_nam,
-                //     mir.tstr_typ,
-                //     mir.stat_num,
-                //     mir.exec_ver,
-                //     mir.test_cod,
-                //     mir.mode_cod,
-                //     mir.tst_temp,
-                //     mir.spec_nam,
-                //     mir.spec_ver,
-                // );
-                // println!("MIR {}", mir_string);
                 mir_cols.insert(msg.sender, mir);
             }
             StdfRecord::SDR(sdr) => {
-                // let sdr_string = format!(
-                //     "{},{},{},{},{},{},{},",
-                //     sdr.hand_id,
-                //     sdr.hand_typ,
-                //     sdr.load_id,
-                //     sdr.cont_id,
-                //     sdr.card_typ,
-                //     sdr.dib_typ,
-                //     sdr.dib_id
-                // );
-                // println!("SDR {}", sdr_string);
                 sdr_cols.insert(msg.sender, sdr);
             }
             StdfRecord::HBR(ref hbr) => {
@@ -168,7 +146,7 @@ fn main() {
                 // println!("SBR {:?}", sbr_cols);
             }
             StdfRecord::PIR(pir) => {
-                let pir_string = format!("{},", pir.site_num);
+                // let pir_string = format!("{},", pir.site_num);
                 // println!("PIR {}", pir_string);
                 pir_cols.insert(msg.sender, pir);
             }
@@ -215,7 +193,7 @@ fn main() {
 
                 test_results.into_iter().for_each(|x| {
                     let ptr_results = results
-                        .entry([x.test_num.to_string(), x.test_txt.clone()].join("___"))
+                        .entry([x.test_num.to_string(), x.test_txt.clone()].join(&args.separator))
                         .or_insert_with(|| vec![]);
 
                     let num_observations = ptr_results.len();
@@ -229,8 +207,6 @@ fn main() {
                     ptr_results.push(Some(x.result));
                 });
 
-                // println!("TEST RESULTS LENGTH {}", test_results.len());
-
                 test_results.clear();
 
                 prrs.entry(msg.sender).or_insert_with(|| vec![]).push(prr);
@@ -239,8 +215,6 @@ fn main() {
             _ => {}
         }
     }
-
-    // println!("RESULTS {:?}", ptr_data);
 
     for (k, mir) in mir_cols {
         let sdr = sdr_cols.get(&k).unwrap();
@@ -283,7 +257,40 @@ fn main() {
             .collect();
 
         let lot_ids = Series::new("Lot ID", vec![mir.lot_id; *total_parts]);
-        let hand_typs = Series::new("Handler Type", vec![sdr.hand_typ.clone(); *total_parts]);
+        let hand_id = Series::new("Handler ID", vec![sdr.hand_id.clone(); *total_parts]);
+        let hand_typ = Series::new("Handler Type", vec![sdr.hand_typ.clone(); *total_parts]);
+        let load_id = Series::new("Loadboard ID", vec![sdr.load_id.clone(); *total_parts]);
+        let cont_id = Series::new("Cont ID", vec![sdr.cont_id.clone(); *total_parts]);
+        let dib_typ = Series::new("DIB Type", vec![sdr.dib_typ.clone(); *total_parts]);
+        let dib_id = Series::new("DIB ID", vec![sdr.dib_id.clone(); *total_parts]);
+
+        let serl_num = Series::new("Serial Num", vec![mir.serl_num; *total_parts]);
+        let setup_t = Series::new(
+            "Setup Time",
+            vec![
+                Utc.timestamp_opt(mir.setup_t.into(), 0)
+                    .unwrap()
+                    .to_rfc3339();
+                *total_parts
+            ],
+        );
+        let part_typ = Series::new("Part Type", vec![mir.part_typ; *total_parts]);
+        let dsgn_rev = Series::new("Design Rev", vec![mir.dsgn_rev; *total_parts]);
+        let pkg_typ = Series::new("Package Type", vec![mir.pkg_typ; *total_parts]);
+        let facil_id = Series::new("Facility ID", vec![mir.facil_id; *total_parts]);
+        let proc_id = Series::new("Process ID", vec![mir.proc_id; *total_parts]);
+        let flow_id = Series::new("Flow ID", vec![mir.flow_id; *total_parts]);
+        let job_nam = Series::new("Job Name", vec![mir.job_nam; *total_parts]);
+        let job_rev = Series::new("Job Rev", vec![mir.job_rev; *total_parts]);
+        let oper_nam = Series::new("Operator Name", vec![mir.oper_nam; *total_parts]);
+        let tstr_typ = Series::new("Tester Type", vec![mir.tstr_typ; *total_parts]);
+        let stat_num = Series::new("Station Num", vec![mir.stat_num as u32; *total_parts]);
+        let exec_ver = Series::new("Exec Version", vec![mir.exec_ver; *total_parts]);
+        let test_cod = Series::new("Test Code", vec![mir.test_cod; *total_parts]);
+        let mode_cod = Series::new("Mode Code", vec![mir.mode_cod.to_string(); *total_parts]);
+        let tst_temp = Series::new("Test Temperature", vec![mir.tst_temp; *total_parts]);
+        let spec_nam = Series::new("Spec Name", vec![mir.spec_nam; *total_parts]);
+        let spec_ver = Series::new("Spec Version", vec![mir.spec_ver; *total_parts]);
 
         let part_ids = Series::new("Part ID", part_id_values);
         let part_txt = Series::new("Part TXT", part_txt_values);
@@ -297,28 +304,49 @@ fn main() {
         let file_names = Series::new("File Name", vec![k.clone(); *total_parts]);
 
         let mut fields = vec![
-            file_names, lot_ids, hand_typs, part_ids, part_txt, hbins, hbin_desc, sbins, sbin_desc,
+            file_names, lot_ids, serl_num, setup_t, part_typ, dsgn_rev, pkg_typ, facil_id, proc_id,
+            flow_id, job_nam, job_rev, oper_nam, tstr_typ, stat_num, exec_ver, test_cod, mode_cod,
+            tst_temp, spec_nam, spec_ver, hand_id, hand_typ, load_id, cont_id, dib_typ, dib_id,
+            part_ids, part_txt, hbins, hbin_desc, sbins, sbin_desc,
         ];
 
         fields.append(&mut ptrs);
 
         let mut df = DataFrame::new(fields).unwrap();
 
-        // let mut df = df!(
-        //     "File Name" => &file_names,
-        //     "Lot ID" => &lot_ids,
-        //     "Handler Type" => &hand_typs,
-        //     "Part ID" => &part_ids,
-        //     "Part TXT" => &part_txts,
-        //     "HBIN" => &hbins,
-        //     "HBIN Description" => &hbin_desc,
-        //     "SBIN" => &sbins,
-        //     "SBIN Description" => &sbin_desc,
-        // )
-        // .unwrap();
+        // if individual output files are required, do it here
+        if args.multiple_output_files {
+            let path = Path::new(&k);
 
-        // println!("{:?}", df);
-        let mut file = std::fs::File::create([k, ".para.csv".to_string()].join("")).unwrap();
+            let dir = if output_dir.is_some() {
+                output_dir.unwrap().clone()
+            } else {
+                path.parent().unwrap()
+            };
+
+            let file_name =
+                [path.file_name().unwrap(), OsStr::new(".para.csv")].join(OsStr::new(""));
+
+            let mut file = std::fs::File::create(dir.join(file_name)).unwrap();
+            CsvWriter::new(&mut file).finish(&mut df).unwrap();
+        } else {
+            // append dfs to df vec
+            dfs.push(df);
+        }
+    }
+
+    if !args.multiple_output_files {
+        let mut df = diag_concat_df(&dfs).unwrap();
+
+        let dir = if output_dir.is_some() {
+            output_dir.unwrap().clone()
+        } else {
+            Path::new(".")
+        };
+
+        let file_name = OsStr::new("para.csv");
+
+        let mut file = std::fs::File::create(dir.join(file_name)).unwrap();
         CsvWriter::new(&mut file).finish(&mut df).unwrap();
     }
 

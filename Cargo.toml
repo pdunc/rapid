@@ -8,5 +8,5 @@ edition = "2021"
 [dependencies]
 chrono = "0.4.26"
 clap = { version = "4.3.2", features = ["derive"] }
-polars = "0.30.0"
+polars = { version = "0.30.0", features = ["diagonal_concat"] }
 rust-stdf = "0.3.1"
